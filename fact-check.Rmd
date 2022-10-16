@@ -1,0 +1,520 @@
+---
+title: "Untitled"
+output: html_document
+date: "2022-10-11"
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(readr)
+library(janitor)
+library(lubridate)
+library(sf)
+library(tidycensus)
+options(digits=3)
+options(scipen=999)
+'%notin%' <- Negate('%in%')
+census_api_key("INSERT YOUR API KEY HERE")
+
+#does a standard group_by and count() with percentage
+grouper <- function(input_df, group_by_column, new_column_name = "n()"){
+  output_df <- input_df %>%
+    group_by(.data[[group_by_column]]) %>%
+    summarise(temp_count = n()) %>%
+    mutate(percent = temp_count/sum(temp_count)*100) %>%
+    arrange(desc(percent)) %>%
+    rename(!!new_column_name := temp_count)
+  return(output_df)
+}
+
+#group/counts every column in input dataframe
+group_count <- function(input_df, group_column_name='n()', state_filter=NA, start_col = 1){
+  column_names <- colnames(input_df)
+  if(!is.na(state_filter)){
+    input_df <- input_df %>%
+      filter(state == state_filter)
+  }
+  for (column in column_names[start_col:length(column_names)]){
+    output <- grouper(input_df, column, group_column_name)
+    print(output)
+  }
+}
+
+grouper_sum <- function(input_df, group_by_column, sum_column, new_column_name = "n()"){
+  output_df <- input_df %>%
+    group_by(.data[[group_by_column]]) %>%
+    summarise(temp_count = sum(.data[[sum_column]])) %>%
+    mutate(percent = temp_count/sum(temp_count)*100) %>%
+    arrange(desc(percent)) %>%
+    rename(!!new_column_name := temp_count)
+  return(output_df)
+  
+}
+
+#lowers case of every character column in a dataframe
+lower_df <- function(input_df){
+  names <- colnames(input_df)
+  output_df <- input_df
+  names <- colnames(output_df)
+  for (name in names){
+    if (is.character(output_df[[name]])){
+      output_df[[name]] <- tolower(output_df[[name]])
+      #print('yes')
+    } else {
+      output_df[[name]] <- output_df[[name]]
+      #print('no')
+    }
+  }
+  return(output_df)
+}
+
+
+```
+
+
+Note: The crime and victims database is too large to save to GitHub. To execute the code, please download the last [Baltimore Police Part 1 Crimes Database](https://data.baltimorecity.gov/datasets/part-1-crime-data-/explore) and save it in the data folder.
+
+## IMPORT 
+
+```{r}
+
+victims <- read_csv('data/Part_1_Crime_Data_.csv') %>%
+  #cleaning column names
+  clean_names() %>%
+  #lowering text in df
+  lower_df() %>%
+  #converting to lubridate
+  mutate(crime_date_time = ymd_hms(crime_date_time))  %>%
+  #making year month hour columns
+  mutate(year = year(crime_date_time),
+         month = month(crime_date_time),
+         hour = hour(crime_date_time),
+         date = as_date(crime_date_time, 'day')) %>%
+  #removing lat/long because there are multiples and ethnicity because it is unreliable
+  select(-x, -y, -row_id, -latitude, -longitude, -ethnicity) %>%#, -shape) %>%
+  #filtering for year
+  #filter(year >= 2011) %>%
+  #splitting geo location
+  separate(geo_location, c("latitude", "longitude"), ',') %>%
+  #removing parenthesis
+  mutate(latitude = gsub('\\(', '', latitude),
+         longitude = gsub('\\)', '', longitude)) %>%
+  #modifying ages that can't be or are very unlikely to be real
+  mutate(age = case_when(
+    age > 0 & age < 100 ~ age,
+    TRUE ~ NA_real_
+  )) %>%
+  #classifying age ranges
+  mutate(age_range = case_when(
+    age < 18 & age > 0 ~ "juvenile",
+    age >= 18 & age <= 25 ~ "18 to 25",
+    age >= 26 & age <= 34 ~ "26 to 34",
+    age >= 35 & age <= 50 ~ "35 to 50",
+    age > 50 & age < 75 ~ "51 to 74",
+    age >= 75 & age < 85 ~ "75 to 84",
+    age >= 85 ~ "85 to 100",
+    TRUE ~ "NA"
+  )) %>%
+  #classifying time of shooting
+  mutate(time_range = case_when(
+    hour <= 3 ~ "early morning",
+    hour < 12 & hour > 3 ~ "morning",
+    hour >= 12 & hour < 15 ~ "early afternoon",
+    hour >= 13 & hour < 17 ~ "after school",
+    hour >= 17 & hour < 20 ~ "evening",
+    hour >= 20 ~ "night"
+  ))  %>%
+  #labeling quarter by month
+    mutate(quarter = case_when(
+    month %in% c(1,2,3) ~ 1,
+    month %in% c(4,5,6) ~ 2,
+    month %in% c(7,8,9) ~ 3,
+    month %in% c(10,11,12) ~ 4
+  )) %>%
+  #labeling end date of each quarter for viz purposes
+  mutate(quarter_date = case_when(
+    quarter == 1 ~ ymd(paste0(year, "-3-31")),
+    quarter == 2 ~ ymd(paste0(year, "-6-30")),
+    quarter == 3 ~ ymd(paste0(year, "-9-30")),
+    quarter == 4 ~ ymd(paste0(year, "-12-31"))
+  ))
+
+shooting_victims <- victims %>%
+  #removing unreliable years
+  filter(year >= 2014) %>%
+  #filtering for shootings and homicides where a firearm was used
+  filter(description %in% c("shooting", "homicide")) %>%
+  filter(weapon == "firearm") 
+
+shooting_crimes <- shooting_victims %>%
+  #grouping by distinct instance characteristics to counts crime incidents instead of victions
+  group_by(crime_date_time, location, district, neighborhood, premise, year, month, date, time_range, quarter, latitude, longitude) %>%
+  #summarising characteristics of crimes victims
+  summarise(victims = n(),
+            juvenile_victims = sum(age_range == "juvenile"),
+            homicides = sum(description == "homicide"),
+            juvenile_homicides = sum(description == "homicide" & age_range == "juvenile"),
+            average_age = mean(age, na.rm = TRUE),
+            description = paste0(unique(description), collapse = ", "),
+            age_of_victims = paste0(age, collapse = ", "),
+            black_victims = sum(race == "black_or_african_american"),
+            white_victims = sum(race == "white"),
+            asian_victims = sum(race == "asian")
+            )
+
+juvenile_victims <- shooting_victims %>%
+  filter(age_range == "juvenile")
+```
+
+## Fact Check
+
+" More children under the age of 18 have been shot in the city so far in 2022 than in any year since 2014, an analysis by The Baltimore Banner has found."
+
+```{r}
+#builds list of unique years in db
+years <- sort(unique(shooting_victims$year))
+
+
+#loops through years
+for (nume in seq(1:length(years))){
+  
+  input_year <- years[nume]
+  #filtering for year and grouping by age range
+  temp <- shooting_victims %>% 
+    filter(year == input_year) %>%
+    group_by(age_range) %>%
+    summarise(!!paste0("x", input_year) := n())
+  
+  #handling output joins based on position in loop
+  if (nume == 1){
+    
+    output <- temp
+    
+  } else {
+    output <- output %>%
+      full_join(temp)
+  }
+}
+
+#writing output to named df
+raw_counts_by_year <- output
+
+rm(output)
+
+raw_counts_by_year %>%
+  filter(age_range == "juvenile") 
+```
+
+```{r}
+raw_counts_by_year
+```
+
+
+"This historically violent year for Baltimore’s children has been fueled by a winter and spring that each had the most young people struck by gunfire since 2014, the earliest year in the Baltimore Police Department’s public release of violent crimes data without significant data deficiencies."
+
+```{r}
+
+#building by quarter counts
+juvenile_shooting_victims_by_quarter <- shooting_victims %>%
+  #grouping by quarter
+  group_by(year, month) %>%
+  #counting juvenile victims
+  summarise(juvenile_victims = sum(age_range == "juvenile")) %>%
+  arrange(desc(juvenile_victims)) %>%
+  #rebuilding day for viz
+  mutate(date = ymd(paste0(year, "-", month, "-1"))) %>%
+  ungroup() %>%
+  #assigning quarter
+  mutate(quarter = case_when(
+    month %in% c(1,2,3) ~ 1,
+    month %in% c(4,5,6) ~ 2,
+    month %in% c(7,8,9) ~ 3,
+    month %in% c(10,11,12) ~ 4
+  )) %>%
+  #regrouping by quarter
+  group_by(year, quarter) %>%
+  summarise(juvenile_victims = sum(juvenile_victims)) %>%
+  mutate(date = case_when(
+    quarter == 1 ~ ymd(paste0(year, "-3-31")),
+    quarter == 2 ~ ymd(paste0(year, "-6-30")),
+    quarter == 3 ~ ymd(paste0(year, "-9-30")),
+    quarter == 4 ~ ymd(paste0(year, "-12-31"))
+  )) 
+
+  
+```
+
+
+```{r}
+
+juvenile_shooting_victims_by_quarter %>%
+  filter(quarter == 1) %>%
+  arrange(desc(juvenile_victims))
+
+```
+
+```{r}
+
+juvenile_shooting_victims_by_quarter %>%
+  filter(quarter == 2) %>%
+  arrange(desc(juvenile_victims))
+
+```
+
+"Most of the 71 shooting victims are 16- and 17-year-old males."
+
+```{r}
+
+grouper(juvenile_victims %>%
+          filter(year == 2022), "age")
+
+```
+
+```{r}
+
+grouper(juvenile_victims %>%
+          filter(year == 2022) ,"race")
+
+```
+
+"And nearly all of the victims are Black."
+
+```{r}
+
+grouper(juvenile_victims %>%
+          filter(year == 2022), "race")
+
+```
+
+"Nearly one out of three children shot in Baltimore this year were shot in the Eastern District, a policing jurisdiction with a relatively small population but one which has long suffered from high rates of gun violence."
+
+```{r}
+
+grouper(juvenile_victims %>%
+          filter(year == 2022), "district")
+
+```
+
+Seven other juvenile shootings occurred just outside the district’s borders.
+
+```{r}
+
+#See map visualization in story. 
+
+```
+
+In response to questions from The Banner, Baltimore Police admitted the data was unreliable in the years before 2014. It lists only six juvenile shootings in 2012 and 2013 — a likely undercount — and lists none in 2011. The annual count of Baltimore homicides has increased about 50% since 2014.
+
+```{r}
+
+grouper(victims %>%
+  filter(age_range == "juvenile") %>%
+  filter(year <= 2014) %>%
+  filter(description %in% c("homicide", "shooting")) %>%
+  filter(weapon == "firearm"), "year")
+
+```
+
+"No one neighborhood stands out as an outlier in children being shot, but the shootings are more concentrated in majority Black neighborhoods that also have some of the lowest incomes in the city."
+
+```{r}
+
+#if this isn't working, you need to include a census api key in the top code block
+income <- get_acs(geography = "tract", 
+              variables = c(median_income = "B19013_001"), 
+              state = "MD", 
+              year = 2020)  %>%
+  clean_names() %>%
+  filter(str_detect(name, "Baltimore city"))
+
+race <- read_csv("data/05_tract_pl94171_standard_compare_2010_2020.csv") %>%
+  clean_names() %>%
+  select(geoid_11, x2020_pop, x2020_pop_black_non_hisp, x2020_pop_hisp) %>%# ,  x2020_pop_white_non_hisp ) 
+  rename(geoid = geoid_11)
+  
+  
+neighborhood_income <- read_csv("data/baltimore-neighborhoods-crosswalk.csv") %>%
+  rename(geoid = tract) %>%
+  mutate(geoid = as.character(geoid)) %>%
+  left_join(income) %>%
+  left_join(race) %>%
+  mutate(neighborhood_median_income = estimate * percent_neighborhood) %>%
+  group_by(neighborhood) %>%
+  summarise(average_median_income = mean(estimate, na.rm = TRUE),
+            whole = sum(percent_neighborhood),
+            x2020_pop = sum(x2020_pop),
+            x2020_pop_black_non_hisp = sum(x2020_pop_black_non_hisp),
+            x2020_pop_hisp = sum(x2020_pop_hisp)) %>%
+  lower_df() %>%
+  mutate(income_rank = dense_rank(average_median_income)) %>%
+  mutate(percent_black = x2020_pop_black_non_hisp/x2020_pop) %>%
+  mutate(percent_minority = (x2020_pop_black_non_hisp + x2020_pop_hisp)/x2020_pop) %>%
+  mutate(majority_black = case_when(
+    percent_black >= .5 ~ TRUE,
+    TRUE ~ FALSE
+  )) %>%
+  mutate(majority_minority = case_when(
+    percent_minority >= .5 ~ TRUE,
+    TRUE ~ FALSE
+  ))
+
+
+victims_income_by_neighborhood <- juvenile_victims %>%
+  filter(year == 2022) %>%
+  group_by(neighborhood) %>%
+  summarise(victims = n()) %>%
+  full_join(neighborhood_income) %>%
+  arrange(desc(victims))
+
+victims_income_by_neighborhood[is.na(victims_income_by_neighborhood)] <- 0
+
+cor(victims_income_by_neighborhood %>%
+  select(-neighborhood, -whole))
+
+```
+
+```{r}
+
+grouper(victims_income_by_neighborhood, "majority_black", "shooting_victims")
+
+```
+
+
+"The vast majority of children shot in Baltimore are Black males. Since 2014, six white children have been shot in the city, compared to 457 Black children."
+
+```{r}
+
+grouper(juvenile_victims %>%
+          filter(year >= 2014), "race")
+
+```
+
+## VIZ FACT CHECK
+
+
+The number of juveniles shot in Baltimore has gradually increased since 2013
+The first three quarters of 2022 have exceeded all but the worst spikes of juvenile shooting victims.
+
+```{r}
+
+sub_shooting_victims <- shooting_victims %>%
+  filter(month %notin% c(10, 11, 12))
+
+
+for (nume in seq(1:length(years))){
+  
+  input_year <- years[nume]
+  temp <- sub_shooting_victims %>% 
+    filter(year == input_year) %>%
+    group_by(age_range) %>%
+    summarise(!!paste0("x", input_year) := n())
+  
+  if (nume == 1){
+    
+    output <- temp
+    
+  } else {
+    output <- output %>%
+      full_join(temp)
+  }
+}
+
+raw_counts_by_year_through_sept <- output
+
+as.data.frame(raw_counts_by_year_through_sept %>%
+  adorn_totals("row"))
+```
+
+Juvenile shooting victims per resident have exploded in the Eastern District, while others are just beginning to reach 2021 totals
+The number of juvenile shooting victims per resident is four times higher in the first nine months of 2022 than the 2020 pandemic low.
+
+```{r}
+
+district_pop <- read_csv("data/2020-census-by-bpd-district.csv") %>%
+  rename(district = dist_name) %>%
+  lower_df() %>%
+  mutate(district = case_when(
+      district == "northeastern" ~ "northeast",
+      district == "northwestern" ~ "northwest",
+      district == "southwestern" ~ "southwest",
+      district == "southeastern" ~ "southeast",
+      TRUE ~ district
+    ))
+
+district_pop
+
+```
+
+```{r}
+
+grouper(shooting_victims %>%
+    filter(age_range == "juvenile") %>%
+    filter(year == 2022), "district", "juvenile_shooting_victims") %>%
+    left_join(district_pop) %>%
+    select(district, juvenile_shooting_victims, x2020_pop) %>%
+    mutate(juvenile_shootings_per_10k = juvenile_shooting_victims/(x2020_pop/10000)) %>%
+    arrange(desc(juvenile_shootings_per_10k))
+
+```
+
+The percent increase in the number of juvenile shooting victims is greater than that of any other age group
+The number of older shooting victims has also increased through the first three quarters of 2022, but at a lower rate than juveniles.
+
+```{r}
+
+raw_counts_by_year_through_sept %>%
+  select(age_range, x2021, x2022) %>%
+  mutate(change = x2022 - x2021) %>%
+  filter(age_range != "NA") %>%
+  mutate(change_perc= change/x2021) %>%
+  arrange(desc(change_perc))
+
+```
+
+Nearly 1 in 3 juveniles shot in Baltimore were shot in the Eastern district
+Seven Others were shot just outside the relatively small district that has long suffered high rates of gun violence.
+
+```{r}
+
+clean_shooting_crimes <- shooting_crimes %>%
+  filter(juvenile_victims >= 1) %>%
+  filter(year == 2022) %>%
+  mutate(marker = case_when(
+    juvenile_homicides >= 1 ~ "Killed",
+    juvenile_homicides == 0 ~ "Shot"
+  )) %>%
+  mutate(header = case_when(
+    juvenile_homicides > 1 & juvenile_victims == juvenile_homicides ~  paste0(juvenile_homicides, " Juveniles Shot and Killed"),
+    juvenile_homicides == 1 & juvenile_victims == juvenile_homicides ~ "Juvenile Shot and Killed",
+    juvenile_homicides == 0  & juvenile_victims == 1 ~ "Juvenile Shot",
+    juvenile_homicides == 1 & juvenile_victims > 1 ~ paste0(juvenile_victims, " Juveniles Shot, 1 Killed"),
+    juvenile_homicides > 1 & juvenile_victims != juvenile_homicides ~ paste0(juvenile_victims, " Juveniles Shot, ", juvenile_homicides, " Killed"),
+    juvenile_homicides == 0  & juvenile_victims > 1 ~ paste0(juvenile_victims, " Juveniles Shot")
+  ))%>%
+  mutate(adult_victims = victims - juvenile_victims) %>%
+  mutate(adult_homicides = homicides - juvenile_homicides) %>%
+  mutate(adult_header = case_when(
+    adult_homicides > 1 & adult_victims == adult_homicides ~  paste0(adult_homicides, " adults also shot and killed"),
+    adult_homicides == 1 & adult_victims == adult_homicides ~ "Adult also shot and killed",
+    adult_homicides == 0  & adult_victims == 1 ~ "Adult also shot",
+    adult_homicides == 1 & adult_victims > 1 ~ paste0(adult_victims, " adults also shot, 1 killed"),
+    adult_homicides > 1 & adult_victims != adult_homicides ~ paste0(adult_victims, " adults also shot, ", adult_homicides, " Killed"),
+    adult_homicides == 0  & adult_victims > 1 ~ paste0(adult_victims, " adults also shot")
+  )) %>%
+  mutate(day = day(date)) %>%
+  mutate(time_range = str_to_title(time_range),
+         premise = str_to_title(premise),
+         location = str_to_title(location),
+         neighborhood = str_to_title(neighborhood),
+         district = str_to_title(district)
+         ) %>%
+  mutate(age_label = case_when(
+    str_detect(age_of_victims, ",") == TRUE ~ "Ages",
+    TRUE ~ "Age"
+  ))
+
+```
+
