@@ -54,7 +54,7 @@ This analysis of Open Baltimore Part 1 crime victims database defines shooting v
 
 While reviewing this analysis, it is important to focus on the difference between the number of crimes and the number of victims. The data includes one row for every victim of a Part 1 crime. To get distinct crimes, we grouped them by time and location. In some cases, a shooting event led to multiple victims, some who were homicide victims and others who were shooting victims. Our analysis counts this as one shooting crime, but multiple shooting victims.
 
-<a id="limitations></a>
+<a id="limitations"></a>
 
 ## Limitations
 ### Missing entries and errors we overcame to tell this story
