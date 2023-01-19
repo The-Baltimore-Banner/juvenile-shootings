@@ -1,4 +1,4 @@
-Juvenile Shoootings Analysis
+Juvenile Shootings Analysis
 ================
  - [Overview](#overview)
  - [Data](#data)
